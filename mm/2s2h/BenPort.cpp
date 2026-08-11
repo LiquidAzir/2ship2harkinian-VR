@@ -30,6 +30,7 @@
 
 #include <fast/interpreter.h>
 #include "2s2h/vr/vr.h"
+#include "2s2h/vr/VrGame.h"
 #if defined(ENABLE_VR) && defined(_WIN32)
 #include <SDL2/SDL_hints.h>
 #endif
@@ -1231,9 +1232,12 @@ static bool MmVr_RenderFrame(Fast::Interpreter* intp, Gfx* commands, const std::
         gui->StartDraw();
         intp->StartFrame();
         vr_begin_frame();
-        // MM interim stereo gate: everything except Theater renders per-eye. VrGame (later phases)
-        // adds game-state routing (cutscenes and 2D screens to the panel, etc.).
-        const bool stereo = vr_get_view_mode() != VR_VIEW_THEATER;
+        // The item wheel paints into ImGui's foreground list this frame; it is presented on the
+        // head-locked menu panel in the branch below.
+        VrGameWheel_DrawImGui();
+        // Stereo routing lives in VrGame: per-eye for gameplay, the flat panel for Theater mode
+        // and for screens with no play state (title / file select), like the donor ports.
+        const bool stereo = VrGame_StereoActive();
         if (stereo) {
             const int eyes = vr_eye_count();
             for (int e = 0; e < eyes; e++) {
@@ -1248,17 +1252,30 @@ static bool MmVr_RenderFrame(Fast::Interpreter* intp, Gfx* commands, const std::
             intp->RunVrPanel(commands, m, vr_overlay_width(), vr_overlay_height());
             vr_submit_panel_texture(intp->GetVrFbTextureId(), vr_overlay_width(), vr_overlay_height());
         }
-        vr_submit();
-        gui->EndDraw();
-        // Mirror the rendered VR frame onto the flat window as the last write before the swap, so
-        // the desktop shows the game instead of stale back-buffers. Stereo sources take the central
-        // crop (the raw eye texture is a wide asymmetric frustum that reads as a fisheye flat).
+        const bool menuVisible = gui->GetMenuOrMenubarVisible() || VrGameWheel_Visible();
         uint32_t mW = 0, mH = 0;
         int32_t mX = 0, mY = 0;
         intp->GetDimensions(&mW, &mH, &mX, &mY);
-        const int sw = stereo ? vr_eye_width(0) : vr_overlay_width();
-        const int sh = stereo ? vr_eye_height(0) : vr_overlay_height();
-        vr_mirror_game_desktop(intp->GetVrFbTextureId(), sw, sh, (int)mW, (int)mH, stereo ? 1 : 0);
+        if (menuVisible) {
+            // ImGui (the port menu and the VR item wheel) renders into the private menu FBO and
+            // rides the head-locked panel over the live stereo world - the donor's pattern, so
+            // menus are visible and stable inside the headset instead of desktop-only.
+            vr_menu_render_begin((int)mW, (int)mH);
+            gui->EndDraw();
+            vr_menu_apply_opacity();
+            vr_menu_render_present((int)mW, (int)mH);
+            vr_submit();
+            vr_menu_mirror_desktop((int)mW, (int)mH);
+        } else {
+            vr_submit();
+            gui->EndDraw();
+            // Mirror the rendered VR frame onto the flat window as the last write before the swap,
+            // so the desktop shows the game instead of stale back-buffers. Stereo sources take the
+            // central crop (the raw eye texture reads as a fisheye on a flat monitor).
+            const int sw = stereo ? vr_eye_width(0) : vr_overlay_width();
+            const int sh = stereo ? vr_eye_height(0) : vr_overlay_height();
+            vr_mirror_game_desktop(intp->GetVrFbTextureId(), sw, sh, (int)mW, (int)mH, stereo ? 1 : 0);
+        }
         intp->EndFrame();
         return true;
     }

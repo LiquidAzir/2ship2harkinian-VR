@@ -616,6 +616,15 @@ void PadMgr_HandleRetrace(void) {
     // osRecvMesg(serialEventQueue, NULL, OS_MESG_BLOCK);
     osContGetReadData(sPadMgrInstance->pads);
 
+#if defined(ENABLE_VR) && defined(_WIN32)
+    {
+        // OpenXR motion controllers merge into pad 0 ahead of the game's edge detection
+        // (2s2h/vr/VrGame.cpp), so they drive gameplay and every menu exactly like a gamepad.
+        void VrGame_MergePad(OSContPad* pad);
+        VrGame_MergePad(&sPadMgrInstance->pads[0]);
+    }
+#endif
+
     // Clear all but controller 1
     memset(&sPadMgrInstance->pads[1], 0, sizeof(*sPadMgrInstance->pads) * (MAXCONTROLLERS - 1));
 
