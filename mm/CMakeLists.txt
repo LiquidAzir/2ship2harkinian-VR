@@ -650,6 +650,20 @@ else()
     target_link_libraries(${PROJECT_NAME} PRIVATE "${ADDITIONAL_LIBRARY_DEPENDENCIES}")
 endif()
 
+################################################################################
+# VR (OpenXR) - SPEC.md Phase 1. Windows/OpenGL only: the OpenXR session binds
+# to the WGL context, so the VR path force-selects the GL backend at startup.
+################################################################################
+option(ENABLE_VR "Build the OpenXR VR layer (Windows/OpenGL only)" ON)
+if (ENABLE_VR AND CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    find_package(OpenXR CONFIG REQUIRED)
+    find_package(GLEW REQUIRED)
+    # Game target only: libultraship's Fast3D VR hooks are runtime-gated on vr_is_active() and
+    # reference no ENABLE_VR symbol (verified against the mm-vr branch).
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_VR=1)
+    target_link_libraries(${PROJECT_NAME} PRIVATE OpenXR::openxr_loader GLEW::GLEW)
+endif()
+
 if(CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch")
 
 nx_generate_nacp(2s2h.nacp

@@ -29,6 +29,10 @@
 #include <stb_image.h>
 
 #include <fast/interpreter.h>
+#include "2s2h/vr/vr.h"
+#if defined(ENABLE_VR) && defined(_WIN32)
+#include <SDL2/SDL_hints.h>
+#endif
 #include <fast/backends/gfx_rendering_api.h>
 #include <fast/Fast3dWindow.h>
 
@@ -155,6 +159,22 @@ OTRGlobals::OTRGlobals() {
     context->InitConfiguration();
     context->InitConsoleVariables();
 
+#if defined(ENABLE_VR) && defined(_WIN32)
+    // OpenXR binds to the WGL context, so force the OpenGL backend before InitWindow reads
+    // Window.Backend.Id - 2S2H defaults to DirectX 11 on Windows, which has no XR path (a wrong
+    // backend is a silent black headset). MM_VR_EYEDUMP / MM_DIAG_DUMP are the headless render
+    // verification seams and need the GL backend for the same reason.
+    if (vr_is_requested() || getenv("MM_VR_EYEDUMP") != nullptr || getenv("MM_DIAG_DUMP") != nullptr) {
+        context->GetConfig()->SetInt("Window.Backend.Id", (int32_t)Fast::WindowBackend::FAST3D_SDL_OPENGL);
+        context->GetConfig()->SetString("Window.Backend.Name", "OpenGL");
+        SPDLOG_INFO("[VR] requested - forced OpenGL backend (OpenXR binds to WGL)");
+        // The VR compositor holds OS focus; without this SDL stops delivering gamepad state to the
+        // unfocused desktop window and menu navigation goes dead in the headset.
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        CVarSave();
+    }
+#endif
+
     auto controlDeck = std::make_shared<LUS::ControlDeck>(std::vector<CONTROLLERBUTTONS_T>({
         BTN_CUSTOM_MODIFIER1,
         BTN_CUSTOM_MODIFIER2,
@@ -272,6 +292,14 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
     std::vector<std::string> args;
     if (argc > 1) {
         for (int i = 1; i < argc; i++) {
+#if defined(ENABLE_VR) && defined(_WIN32)
+            // VR runtime flags, not ROM paths - already consumed by InitOTR's VR enable decision.
+            // Without this filter the extractor runs RunFileStandalone("--vr"), fails, and parks
+            // the boot at a "not a ROM" popup before the game loop (and the OpenXR boot) can run.
+            if (strcmp(argv[i], "--vr") == 0 || strcmp(argv[i], "--novr") == 0) {
+                continue;
+            }
+#endif
             args.push_back(argv[i]);
         }
     }
@@ -949,6 +977,24 @@ bool VerifyArchiveVersion(ArchiveVersion version) {
 }
 
 extern "C" void InitOTR(int argc, char* argv[]) {
+#if defined(ENABLE_VR) && defined(_WIN32)
+    // VR enable decision before the engine exists: --vr forces on, --novr forces off, and with
+    // neither flag a throwaway OpenXR instance probes for a connected HMD and auto-enables. One
+    // exe: VR when a headset answers, the stock flat game when it doesn't. (SPEC.md §7)
+    {
+        bool forceVr = false, forceNoVr = false;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--vr") == 0) {
+                forceVr = true;
+            } else if (strcmp(argv[i], "--novr") == 0) {
+                forceNoVr = true;
+            }
+        }
+        if (forceVr || (!forceNoVr && vr_headset_present())) {
+            vr_request_enable();
+        }
+    }
+#endif
     OTRGlobals::Instance = new OTRGlobals();
     OTRGlobals::Instance->RunExtract(argc, argv);
 
@@ -1158,6 +1204,149 @@ extern "C" void Graph_StartFrame() {
 }
 
 // Interpolated frames of a tick are evenly spaced numerators time+step, time+2*step, ... over denom.
+#if defined(ENABLE_VR) && defined(_WIN32)
+// VR frame path (SPEC.md Phases 2-3), shape ported from BanjoKazooie-VR's GameEngine::RunCommands.
+// Returns true when it consumed the sub-frame (VR active, or one of the headless dump seams ran the
+// expanded flat path); false falls through to the stock DrawAndRunGraphicsCommands.
+static bool MmVr_RenderFrame(Fast::Interpreter* intp, Gfx* commands, const std::unordered_map<Mtx*, MtxF>& m) {
+    const bool vrActive = vr_is_requested() && vr_is_active();
+    if (vr_is_requested() && !vrActive) {
+        // Booting: advance the OpenXR session and close any frame it begins (safe no-op otherwise),
+        // then fall through to the flat render so the desktop shows the game while VR spins up.
+        vr_begin_frame();
+        vr_submit();
+    }
+    const bool dumpSeam = getenv("MM_VR_EYEDUMP") != nullptr || getenv("MM_DIAG_DUMP") != nullptr;
+    if (!vrActive && !dumpSeam) {
+        return false;
+    }
+
+    auto wndBase = Ship::Context::GetRawInstance()->GetWindow();
+    auto gui = wndBase->GetGui();
+
+    if (vrActive) {
+        // No IsFrameReady gate here: the headset paces this loop through xrWaitFrame inside
+        // vr_begin_frame, so the HMD runs at its native refresh.
+        wndBase->GetMouseStateManager()->StartFrame();
+        gui->StartDraw();
+        intp->StartFrame();
+        vr_begin_frame();
+        // MM interim stereo gate: everything except Theater renders per-eye. VrGame (later phases)
+        // adds game-state routing (cutscenes and 2D screens to the panel, etc.).
+        const bool stereo = vr_get_view_mode() != VR_VIEW_THEATER;
+        if (stereo) {
+            const int eyes = vr_eye_count();
+            for (int e = 0; e < eyes; e++) {
+                intp->RunVrEye(commands, m, vr_eye_viewproj(e), vr_sky_viewproj(e), vr_hud_viewproj(e),
+                               vr_hud_viewproj_flat(e), vr_full2d_viewproj(e), nullptr, vr_eye_width(e),
+                               vr_eye_height(e));
+                vr_submit_eye_texture(e, intp->GetVrFbTextureId(), vr_eye_width(e), vr_eye_height(e));
+            }
+        } else {
+            // Theater: the flat frame once onto the head-locked panel quad, no stereo substitution.
+            vr_set_panel_mode(true);
+            intp->RunVrPanel(commands, m, vr_overlay_width(), vr_overlay_height());
+            vr_submit_panel_texture(intp->GetVrFbTextureId(), vr_overlay_width(), vr_overlay_height());
+        }
+        vr_submit();
+        gui->EndDraw();
+        // Mirror the rendered VR frame onto the flat window as the last write before the swap, so
+        // the desktop shows the game instead of stale back-buffers. Stereo sources take the central
+        // crop (the raw eye texture is a wide asymmetric frustum that reads as a fisheye flat).
+        uint32_t mW = 0, mH = 0;
+        int32_t mX = 0, mY = 0;
+        intp->GetDimensions(&mW, &mH, &mX, &mY);
+        const int sw = stereo ? vr_eye_width(0) : vr_overlay_width();
+        const int sh = stereo ? vr_eye_height(0) : vr_overlay_height();
+        vr_mirror_game_desktop(intp->GetVrFbTextureId(), sw, sh, (int)mW, (int)mH, stereo ? 1 : 0);
+        intp->EndFrame();
+        return true;
+    }
+
+    // Headless verification seams (donor pattern, no headset involved):
+    //   MM_VR_EYEDUMP=<n>  - render the live display list through RunVrPanel + BOTH RunVrEye passes
+    //                        with synthetic matrices and dump every 30th frame to BMPs beside the
+    //                        exe, n times. Proves the per-eye routing on a machine with no headset.
+    //   MM_DIAG_DUMP=a,b,s - flat panel contact sheet for sub-frames [a,b] step s.
+    if (!wndBase->IsFrameReady()) {
+        return true; // frame skipped - consumed
+    }
+    wndBase->GetMouseStateManager()->StartFrame();
+    gui->StartDraw();
+    intp->StartFrame();
+    {
+        static int sDumpBudget = -2; // -2 = env unread, -1 = disabled
+        if (sDumpBudget == -2) {
+            const char* e = getenv("MM_VR_EYEDUMP");
+            sDumpBudget = e ? atoi(e) : -1;
+            if (sDumpBudget > 0) {
+                setvbuf(stdout, NULL, _IONBF, 0); // externally killed runs lose no prints
+            }
+        }
+        if (sDumpBudget > 0) {
+            static int sFrameNo = 0;
+            // Skip the boot window: dumps must show settled content, and the render-target
+            // machinery is not up in the first frames.
+            if (sFrameNo++ >= 300 && (sFrameNo % 30) == 0) {
+                float eyeVP[16], skyVP[16], hudVP[16], hudFlatVP[16], full2D[16];
+                const int dw = 1024, dh = 1024;
+                char path[64];
+                // Panel first: identical off-screen machinery with NO stereo substitution. If this
+                // matches the flat window, the VR render target is proven and any eye-image fault
+                // lives in the mVrEyeActive routing branches.
+                intp->RunVrPanel(commands, m, dw, dh);
+                snprintf(path, sizeof(path), "vr_panel_dump_%02d.bmp", sDumpBudget);
+                vr_debug_dump_texture(intp->GetVrFbTextureId(), dw, dh, path);
+                // Both eyes, with the live separation math mirrored into the synthetic matrices:
+                // the L/R pair is what proves per-draw stereo routing (the registered sky pass must
+                // land identical between the eyes while the world separates).
+                vr_debug_synth_matrices(0, eyeVP, skyVP, hudVP, hudFlatVP, full2D);
+                intp->RunVrEye(commands, m, eyeVP, skyVP, hudVP, hudFlatVP, full2D, nullptr, dw, dh);
+                snprintf(path, sizeof(path), "vr_eye_dump_%02d.bmp", sDumpBudget);
+                vr_debug_dump_texture(intp->GetVrFbTextureId(), dw, dh, path);
+                vr_debug_synth_matrices(1, eyeVP, skyVP, hudVP, hudFlatVP, full2D);
+                intp->RunVrEye(commands, m, eyeVP, skyVP, hudVP, hudFlatVP, full2D, nullptr, dw, dh);
+                snprintf(path, sizeof(path), "vr_eye_r_dump_%02d.bmp", sDumpBudget);
+                vr_debug_dump_texture(intp->GetVrFbTextureId(), dw, dh, path);
+                sDumpBudget--;
+            }
+        }
+    }
+    {
+        static long sDiagA = -2, sDiagB = 0, sDiagStep = 30, sDiagN = 0;
+        if (sDiagA == -2) {
+            const char* e = getenv("MM_DIAG_DUMP");
+            long a = 0, b = 0, st = 30;
+            if (e != NULL && sscanf(e, "%ld,%ld,%ld", &a, &b, &st) >= 2) {
+                sDiagA = a;
+                sDiagB = b;
+                sDiagStep = st < 1 ? 1 : st;
+                setvbuf(stdout, NULL, _IONBF, 0);
+            } else {
+                sDiagA = -1;
+            }
+        }
+        if (sDiagA >= 0) {
+            const long n = sDiagN++;
+            // Never dump inside the boot window: the render-target machinery is not up in the
+            // first frames.
+            if (n >= 120 && n >= sDiagA && n <= sDiagB && ((n - sDiagA) % sDiagStep) == 0) {
+                const int dw = 1024, dh = 1024;
+                char path[64];
+                intp->RunVrPanel(commands, m, dw, dh);
+                snprintf(path, sizeof(path), "diag_panel_%05ld.bmp", n);
+                vr_debug_dump_texture(intp->GetVrFbTextureId(), dw, dh, path);
+                printf("[DIAG] panel dump %ld\n", n);
+            }
+        }
+    }
+    intp->Run(commands, m);
+    gui->EndDraw();
+    intp->EndFrame();
+    return true;
+}
+#endif
+
 void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
     auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
 
@@ -1179,6 +1368,12 @@ void RunCommands(Gfx* Commands, int time, int step, int denom, int count) {
         std::unordered_map<Mtx*, MtxF> mtx_replacements =
             (time == denom) ? std::unordered_map<Mtx*, MtxF>() : FrameInterpolation_Interpolate((float)time / denom);
         intp->mInterpolationT = (float)time / denom;
+#if defined(ENABLE_VR) && defined(_WIN32)
+        if (MmVr_RenderFrame(intp, Commands, mtx_replacements)) {
+            intp->mInterpolationIndex++;
+            continue;
+        }
+#endif
         wnd->DrawAndRunGraphicsCommands(Commands, mtx_replacements);
         intp->mInterpolationIndex++;
     }
