@@ -154,6 +154,67 @@ void WheelTick() {
     }
 }
 
+// ---- gesture combat + aimed items -------------------------------------------------------------
+//
+// Sword swipe: a fast right-hand movement presses B for a couple of ticks - MM's sword is
+// animation-driven with authored arcs, so the gesture TRIGGERS the swing rather than tracing it
+// (the OoT VR mod's approach). Shield: holding the left hand up near head height holds R, with
+// hysteresis so a wandering hand doesn't flicker the guard. Aimed items: while the player is
+// first-person aiming a projectile (func_800B7128: bow, hookshot, Zora boomerang, Deku bubble),
+// the right hand's angular velocity is synthesized into aim-stick input - rotate the hand and the
+// reticle tracks it 1:1 (gyro-style), through the game's own aim integration, clamps and camera
+// modes, for every aimable item uniformly.
+static int sSwingTicks = 0;    // press B while > 0
+static int sSwingCooldown = 0; // ticks until the next swipe may fire
+static bool sShieldHold = false;
+static bool sAimActive = false;
+
+static void GesturesTick() {
+    if (sSwingCooldown > 0) {
+        sSwingCooldown--;
+    }
+    if (sSwingTicks > 0) {
+        sSwingTicks--;
+    }
+    if (!vr_is_active() || !vr_controllers_active() || gPlayState == NULL ||
+        gPlayState->pauseCtx.state != PAUSE_STATE_OFF || CVarGetInteger("gVRMotionControls", 1) == 0) {
+        sSwingTicks = 0;
+        sShieldHold = false;
+        sAimActive = false;
+        return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+
+    // Aimed items: state read here on the game thread; the stick synth itself runs in the pad
+    // merge so it uses the freshest hand sample each input read.
+    sAimActive = (player != NULL) && CVarGetInteger("gVRAimedItems", 1) != 0 && func_800B7128(player);
+
+    float pos[3], lin[3];
+    // Sword swipe, right hand: linear speed spike -> one B press. The cooldown keeps one physical
+    // swipe from machine-gunning B across ticks; 1.7 m/s is brisk-but-not-violent (live-tunable).
+    if (CVarGetInteger("gVRSwordSwing", 1) != 0 && !sWheelOpen && !sAimActive &&
+        vr_hand_state(1, NULL, NULL, lin, NULL)) {
+        const float speed = sqrtf(lin[0] * lin[0] + lin[1] * lin[1] + lin[2] * lin[2]);
+        if (speed > CVarGetFloat("gVRSwingSpeed", 1.7f) && sSwingCooldown == 0) {
+            sSwingTicks = 2;
+            sSwingCooldown = 10;
+            vr_controller_rumble(0.5f, 0.06f);
+        }
+    }
+    // Shield, left hand: raised toward head height holds R. Hysteresis band: raise above 30 cm
+    // below the head, release only once clearly dropped past 42 cm - no flicker at the boundary.
+    if (CVarGetInteger("gVRShieldRaise", 1) != 0 && vr_hand_state(0, pos, NULL, NULL, NULL)) {
+        if (!sShieldHold && pos[1] > -0.30f) {
+            sShieldHold = true;
+            vr_controller_rumble(0.25f, 0.03f);
+        } else if (sShieldHold && pos[1] < -0.42f) {
+            sShieldHold = false;
+        }
+    } else {
+        sShieldHold = false;
+    }
+}
+
 } // namespace
 
 extern "C" bool VrGameWheel_Visible(void) {
@@ -245,13 +306,36 @@ extern "C" void VrGame_MergePad(OSContPad* pad) {
     vr_controller_stick(0, ls);
     vr_controller_stick(1, rs);
 
-    // Movement merges ADDITIVELY with any real gamepad, clamped to the N64 range the game expects.
+    // Aimed items: while first-person aiming a projectile, the RIGHT HAND owns the aim stick.
+    // Angular velocity becomes stick deflection (gyro-style rate control tuned near 1:1), driven
+    // through the game's own aim integration so clamps, inversion settings and camera modes all
+    // keep working - and it covers bow, hookshot, Zora boomerang and Deku bubble uniformly. The
+    // flat stick's aim role is REPLACED here (it would fight the hand); movement is parked while
+    // aiming anyway.
     const float dead = 0.12f;
-    if (fabsf(ls[0]) > dead || fabsf(ls[1]) > dead) {
-        int sx = pad->stick_x + (int)lroundf(ls[0] * 85.0f);
-        int sy = pad->stick_y + (int)lroundf(ls[1] * 85.0f);
-        pad->stick_x = (int8_t)(sx < -128 ? -128 : (sx > 127 ? 127 : sx));
-        pad->stick_y = (int8_t)(sy < -128 ? -128 : (sy > 127 ? 127 : sy));
+    float av[3];
+    if (sAimActive && !sWheelOpen && vr_hand_state(1, NULL, NULL, NULL, av)) {
+        const float gain = 28.0f * CVarGetFloat("gVRAimGain", 1.0f);
+        int ax = (int)lroundf(-av[1] * gain); // hand yaw-left -> stick left (MM: stick left aims left)
+        int ay = (int)lroundf(av[0] * gain);  // hand pitch-up -> stick up
+        pad->stick_x = (int8_t)(ax < -85 ? -85 : (ax > 85 ? 85 : ax));
+        pad->stick_y = (int8_t)(ay < -85 ? -85 : (ay > 85 ? 85 : ay));
+    } else {
+        // Movement merges ADDITIVELY with any real gamepad, clamped to the N64 range.
+        if (fabsf(ls[0]) > dead || fabsf(ls[1]) > dead) {
+            int sx = pad->stick_x + (int)lroundf(ls[0] * 85.0f);
+            int sy = pad->stick_y + (int)lroundf(ls[1] * 85.0f);
+            pad->stick_x = (int8_t)(sx < -128 ? -128 : (sx > 127 ? 127 : sx));
+            pad->stick_y = (int8_t)(sy < -128 ? -128 : (sy > 127 ? 127 : sy));
+        }
+    }
+
+    // Gesture combat, decided on the game tick: a swipe presses B, a raised left hand holds R.
+    if (sSwingTicks > 0) {
+        pad->button |= BTN_B;
+    }
+    if (sShieldHold) {
+        pad->button |= BTN_R;
     }
 
     if (sWheelOpen) {
@@ -260,8 +344,9 @@ extern "C" void VrGame_MergePad(OSContPad* pad) {
         return;
     }
 
-    // Right stick feeds the pad's right-stick fields for the port's own camera consumers.
-    if (fabsf(rs[0]) > dead || fabsf(rs[1]) > dead) {
+    // Right stick feeds the pad's right-stick fields for the port's own camera consumers (parked
+    // while hand-aiming so the camera doesn't fight the aim).
+    if (!sAimActive && (fabsf(rs[0]) > dead || fabsf(rs[1]) > dead)) {
         int rx = pad->right_stick_x + (int)lroundf(rs[0] * 85.0f);
         int ry = pad->right_stick_y + (int)lroundf(rs[1] * 85.0f);
         pad->right_stick_x = (int8_t)(rx < -128 ? -128 : (rx > 127 ? 127 : rx));
@@ -290,7 +375,10 @@ extern "C" void VrGame_MergePad(OSContPad* pad) {
 // ---- registration -----------------------------------------------------------------------------
 
 static void RegisterVrGame() {
-    COND_HOOK(OnGameStateUpdate, true, WheelTick);
+    COND_HOOK(OnGameStateUpdate, true, []() {
+        WheelTick();
+        GesturesTick();
+    });
 }
 
 static RegisterShipInitFunc vrGameInit(RegisterVrGame, {});

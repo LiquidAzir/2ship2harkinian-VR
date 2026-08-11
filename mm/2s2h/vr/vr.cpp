@@ -984,6 +984,16 @@ static unsigned sCtrlButtons   = 0;              // VR_BTN_* mask, refreshed eac
 static float    sCtrlStick[2][2] = {{ 0 }};      // [hand][x,y], +x right +y up
 static float    sRumbleAmp     = 0.0f;           // armed rumble amplitude (0 = off)
 static XrTime   sRumbleUntil   = 0;              // stop re-arming past this time
+// Hand aim poses (MM: sword swipes, shield raise, and aimed items read these). Located in VIEW
+// space every synced frame, so position is head-relative meters and orientation is head-relative -
+// exactly the frame gesture thresholds want. Velocities ride the same locate (XrSpaceVelocity).
+static XrAction sActAimPose    = XR_NULL_HANDLE; // per-hand pose, /input/aim/pose on every profile
+static XrSpace  sAimSpace[2]   = { XR_NULL_HANDLE, XR_NULL_HANDLE };
+static bool     sHandValid[2]     = { false, false };
+static float    sHandPos[2][3]    = {{ 0 }};     // view-space meters
+static float    sHandFwd[2][3]    = {{ 0 }};     // view-space unit forward (-Z of the aim pose)
+static float    sHandLinVel[2][3] = {{ 0 }};     // view-space m/s
+static float    sHandAngVel[2][3] = {{ 0 }};     // view-space rad/s
 
 static XrAction vr_make_action(XrActionType type, const char* name, const char* localized, bool perHand) {
     XrActionCreateInfo aci = { XR_TYPE_ACTION_CREATE_INFO };
@@ -1050,6 +1060,7 @@ static void vr_input_create(void) {
     sActLGrip    = vr_make_action(XR_ACTION_TYPE_FLOAT_INPUT,     "left_grip",     "Left Grip",           false);
     sActRGrip    = vr_make_action(XR_ACTION_TYPE_FLOAT_INPUT,     "right_grip",    "Right Grip",          false);
     sActHaptic   = vr_make_action(XR_ACTION_TYPE_VIBRATION_OUTPUT,"rumble",        "Rumble",              true);
+    sActAimPose  = vr_make_action(XR_ACTION_TYPE_POSE_INPUT,      "hand_aim",      "Hand Aim Pose",       true);
 
     // Quest Touch (the right controller's Oculus button is reserved by the system, so it isn't bound).
     const VrBind touch[] = {
@@ -1068,6 +1079,8 @@ static void vr_input_create(void) {
         { sActRGrip,    "/user/hand/right/input/squeeze/value" },
         { sActHaptic,   "/user/hand/left/output/haptic" },
         { sActHaptic,   "/user/hand/right/output/haptic" },
+        { sActAimPose,  "/user/hand/left/input/aim/pose" },
+        { sActAimPose,  "/user/hand/right/input/aim/pose" },
     };
     vr_suggest_profile("/interaction_profiles/oculus/touch_controller", touch, (int)(sizeof(touch) / sizeof(touch[0])));
 
@@ -1087,6 +1100,8 @@ static void vr_input_create(void) {
         { sActRGrip,    "/user/hand/right/input/squeeze/value" },
         { sActHaptic,   "/user/hand/left/output/haptic" },
         { sActHaptic,   "/user/hand/right/output/haptic" },
+        { sActAimPose,  "/user/hand/left/input/aim/pose" },
+        { sActAimPose,  "/user/hand/right/input/aim/pose" },
     };
     vr_suggest_profile("/interaction_profiles/valve/index_controller", index, (int)(sizeof(index) / sizeof(index[0])));
 
@@ -1118,6 +1133,8 @@ static void vr_input_create(void) {
         { sActRGrip,    "/user/hand/right/input/squeeze/click" },
         { sActHaptic,   "/user/hand/left/output/haptic" },
         { sActHaptic,   "/user/hand/right/output/haptic" },
+        { sActAimPose,  "/user/hand/left/input/aim/pose" },
+        { sActAimPose,  "/user/hand/right/input/aim/pose" },
     };
     vr_suggest_profile("/interaction_profiles/microsoft/motion_controller", wmr, (int)(sizeof(wmr) / sizeof(wmr[0])));
 
@@ -1134,6 +1151,8 @@ static void vr_input_create(void) {
         { sActRGrip,    "/user/hand/right/input/squeeze/click" },
         { sActHaptic,   "/user/hand/left/output/haptic" },
         { sActHaptic,   "/user/hand/right/output/haptic" },
+        { sActAimPose,  "/user/hand/left/input/aim/pose" },
+        { sActAimPose,  "/user/hand/right/input/aim/pose" },
     };
     vr_suggest_profile("/interaction_profiles/htc/vive_controller", vive, (int)(sizeof(vive) / sizeof(vive[0])));
 
@@ -1144,6 +1163,8 @@ static void vr_input_create(void) {
         { sActMenuBtn, "/user/hand/left/input/menu/click" },
         { sActHaptic,  "/user/hand/left/output/haptic" },
         { sActHaptic,  "/user/hand/right/output/haptic" },
+        { sActAimPose, "/user/hand/left/input/aim/pose" },
+        { sActAimPose, "/user/hand/right/input/aim/pose" },
     };
     vr_suggest_profile("/interaction_profiles/khr/simple_controller", simple, (int)(sizeof(simple) / sizeof(simple[0])));
 
@@ -1152,6 +1173,19 @@ static void vr_input_create(void) {
     sai.actionSets = &sActionSet;
     if (!xrok(xrAttachSessionActionSets(sSession, &sai), "xrAttachSessionActionSets")) { return; }
     sInputAttached = true;
+    // Per-hand aim-pose spaces, located against the VIEW space each frame (head-relative hands).
+    for (int h = 0; h < 2; h++) {
+        sAimSpace[h] = XR_NULL_HANDLE;
+        if (sActAimPose != XR_NULL_HANDLE) {
+            XrActionSpaceCreateInfo asi = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
+            asi.action = sActAimPose;
+            asi.subactionPath = sHandPath[h];
+            asi.poseInActionSpace.orientation.w = 1.0f;
+            if (!xrok(xrCreateActionSpace(sSession, &asi, &sAimSpace[h]), "xrCreateActionSpace(aim)")) {
+                sAimSpace[h] = XR_NULL_HANDLE;
+            }
+        }
+    }
     vrlog("[VR] motion controllers ready (Touch / Touch Plus / Index / G2 / WMR / Vive profiles suggested).\n");
 }
 
@@ -1221,6 +1255,7 @@ static void vr_input_sync(void) {
     if (xrSyncActions(sSession, &si) != XR_SUCCESS) {
         sCtrlButtons = 0;
         memset(sCtrlStick, 0, sizeof(sCtrlStick));
+        sHandValid[0] = sHandValid[1] = false;
         sRumbleAmp = 0.0f;
         return;
     }
@@ -1239,6 +1274,49 @@ static void vr_input_sync(void) {
     sCtrlButtons = b;
     vr_action_vec2(sActMove, sCtrlStick[0]);
     vr_action_vec2(sActCam,  sCtrlStick[1]);
+
+    // Hand aim poses, head-relative: locate each hand's aim space against the VIEW space with
+    // velocities riding along. Position in meters around the head, forward = the aim pose's -Z,
+    // both in view axes (+x right, +y up, -z forward) - the frame gesture thresholds and the
+    // aimed-item synth read directly.
+    for (int h = 0; h < 2; h++) {
+        sHandValid[h] = false;
+        if (sAimSpace[h] == XR_NULL_HANDLE || sViewSpace == XR_NULL_HANDLE) {
+            continue;
+        }
+        XrSpaceVelocity vel = { XR_TYPE_SPACE_VELOCITY };
+        XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION, &vel };
+        if (XR_FAILED(xrLocateSpace(sAimSpace[h], sViewSpace, sFrameState.predictedDisplayTime, &loc))) {
+            continue;
+        }
+        const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if ((loc.locationFlags & need) != need) {
+            continue;
+        }
+        sHandPos[h][0] = loc.pose.position.x;
+        sHandPos[h][1] = loc.pose.position.y;
+        sHandPos[h][2] = loc.pose.position.z;
+        // forward = orientation * (0,0,-1): minus the rotation matrix's third column.
+        const XrQuaternionf q = loc.pose.orientation;
+        sHandFwd[h][0] = -(2.0f * (q.x * q.z + q.w * q.y));
+        sHandFwd[h][1] = -(2.0f * (q.y * q.z - q.w * q.x));
+        sHandFwd[h][2] = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+        if (vel.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
+            sHandLinVel[h][0] = vel.linearVelocity.x;
+            sHandLinVel[h][1] = vel.linearVelocity.y;
+            sHandLinVel[h][2] = vel.linearVelocity.z;
+        } else {
+            sHandLinVel[h][0] = sHandLinVel[h][1] = sHandLinVel[h][2] = 0.0f;
+        }
+        if (vel.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) {
+            sHandAngVel[h][0] = vel.angularVelocity.x;
+            sHandAngVel[h][1] = vel.angularVelocity.y;
+            sHandAngVel[h][2] = vel.angularVelocity.z;
+        } else {
+            sHandAngVel[h][0] = sHandAngVel[h][1] = sHandAngVel[h][2] = 0.0f;
+        }
+        sHandValid[h] = true;
+    }
 
     // Haptics: while armed, re-arm a SHORT burst every frame instead of ever submitting one long
     // vibration. Runtimes don't all honor stop requests promptly (or at all, over wireless) - a
@@ -1271,6 +1349,20 @@ extern "C" void vr_controller_stick(int hand, float out[2]) {
     if (!vr_controllers_active() || hand < 0 || hand > 1) { out[0] = out[1] = 0.0f; return; }
     out[0] = sCtrlStick[hand][0];
     out[1] = sCtrlStick[hand][1];
+}
+
+extern "C" bool vr_hand_state(int hand, float outPosM[3], float outFwd[3], float outLinVelMS[3],
+                              float outAngVelRadS[3]) {
+    if (!vr_controllers_active() || hand < 0 || hand > 1 || !sHandValid[hand]) {
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (outPosM)        { outPosM[i] = sHandPos[hand][i]; }
+        if (outFwd)         { outFwd[i] = sHandFwd[hand][i]; }
+        if (outLinVelMS)    { outLinVelMS[i] = sHandLinVel[hand][i]; }
+        if (outAngVelRadS)  { outAngVelRadS[i] = sHandAngVel[hand][i]; }
+    }
+    return true;
 }
 
 // Arm the rumble. No vibration is submitted here: vr_input_sync re-arms a short burst each
@@ -2588,6 +2680,10 @@ extern "C" void vr_shutdown(void) {
     if (sOverlayDepthRB) { glDeleteRenderbuffers(1, &sOverlayDepthRB); sOverlayDepthRB = 0; }
     if (sHud.handle != XR_NULL_HANDLE) { xrDestroySwapchain(sHud.handle); sHud.handle = XR_NULL_HANDLE; }
     if (sHud.images) { free(sHud.images); sHud.images = NULL; }
+    for (int h = 0; h < 2; h++) {
+        if (sAimSpace[h] != XR_NULL_HANDLE) { xrDestroySpace(sAimSpace[h]); sAimSpace[h] = XR_NULL_HANDLE; }
+        sHandValid[h] = false;
+    }
     if (sViewSpace != XR_NULL_HANDLE) { xrDestroySpace(sViewSpace); sViewSpace = XR_NULL_HANDLE; }
     for (int e = 0; e < 2; e++) {
         if (sEye[e].handle != XR_NULL_HANDLE) { xrDestroySwapchain(sEye[e].handle); sEye[e].handle = XR_NULL_HANDLE; }
@@ -2679,6 +2775,11 @@ extern "C" float vr_head_pitch_rad(void) { return 0; }
 extern "C" bool  vr_controllers_active(void) { return false; }
 extern "C" unsigned vr_controller_buttons(void) { return 0; }
 extern "C" void  vr_controller_stick(int hand, float out[2]) { (void)hand; out[0] = out[1] = 0.0f; }
+extern "C" bool  vr_hand_state(int hand, float outPosM[3], float outFwd[3], float outLinVelMS[3],
+                               float outAngVelRadS[3]) {
+    (void)hand; (void)outPosM; (void)outFwd; (void)outLinVelMS; (void)outAngVelRadS;
+    return false;
+}
 extern "C" void  vr_controller_rumble(float strength, float seconds) { (void)strength; (void)seconds; }
 extern "C" void  vr_controller_rumble_stop(void) {}
 

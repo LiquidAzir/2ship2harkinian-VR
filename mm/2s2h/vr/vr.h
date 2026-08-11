@@ -214,6 +214,12 @@ bool vr_controllers_active(void);
 unsigned vr_controller_buttons(void);
 // Thumbstick state, -1..1 with +x right and +y up. hand: 0 = left, 1 = right.
 void vr_controller_stick(int hand, float out[2]);
+// Hand aim pose, HEAD-RELATIVE (located in the VIEW space): position in meters around the head,
+// forward = the aim pose's -Z, linear velocity m/s and angular velocity rad/s, all in view axes
+// (+x right, +y up, -z forward). Feeds the sword-swipe / shield-raise gestures and aimed items.
+// hand: 0 = left, 1 = right. False until that hand is tracked this frame. Any out pointer may be
+// NULL to skip that field.
+bool vr_hand_state(int hand, float outPosM[3], float outFwd[3], float outLinVelMS[3], float outAngVelRadS[3]);
 // Arm the rumble on both hands: short bursts re-arm each frame while armed, so a runtime that
 // drops a stop request can't strand the motors buzzing.
 void vr_controller_rumble(float strength, float seconds);
