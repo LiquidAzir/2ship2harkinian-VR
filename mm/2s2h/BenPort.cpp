@@ -803,6 +803,17 @@ ImFont* OTRGlobals::CreateDefaultFontWithSize(float size) {
 }
 
 uint32_t OTRGlobals::GetInterpolationFPS() {
+#if defined(ENABLE_VR) && defined(_WIN32)
+    // The headset paces the VR render loop (one xrWaitFrame per sub-frame), so interpolation must
+    // run at the HMD's native refresh - left at the flat default of 20 the headset judders
+    // unplayably. 30 is a sanity floor against a runtime reporting nonsense before the first frame.
+    if (vr_is_requested() && vr_is_active()) {
+        int hz = vr_display_refresh_hz();
+        if (hz >= 30) {
+            return (uint32_t)hz;
+        }
+    }
+#endif
     if (CVarGetInteger("gMatchRefreshRate", 0)) {
         return Ship::Context::GetRawInstance()->GetWindow()->GetCurrentRefreshRate();
     } else if (CVarGetInteger(CVAR_VSYNC_ENABLED, 1) ||

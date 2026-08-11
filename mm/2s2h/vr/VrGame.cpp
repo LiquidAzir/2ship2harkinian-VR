@@ -57,6 +57,12 @@ int sWheelPage = 0;
 int sWheelHover = -1;
 unsigned sPrevTickVb = 0;
 
+// Gesture state (written by GesturesTick below, read by WheelTick and the pad merge).
+int sSwingTicks = 0;    // press B while > 0
+int sSwingCooldown = 0; // ticks until the next swipe may fire
+bool sShieldHold = false;
+bool sAimActive = false;
+
 const char* WheelPageName(int page) {
     switch (page & 3) {
         case 0: return "Items 1";
@@ -104,10 +110,24 @@ void WheelEquipHovered() {
 // gSaveContext and the interface, which must never race the game).
 void WheelTick() {
     if (!vr_is_active() || !vr_controllers_active() || gPlayState == NULL ||
-        gPlayState->pauseCtx.state != PAUSE_STATE_OFF || CVarGetInteger("gVRMotionControls", 1) == 0) {
+        gPlayState->pauseCtx.state != PAUSE_STATE_OFF ||
+        gPlayState->msgCtx.msgMode != MSGMODE_NONE || // textboxes and shops own the buttons; a live
+                                                      // equip mid-dialog can desync shop button state
+        CVarGetInteger("gVRMotionControls", 1) == 0) {
         sWheelOpen = false;
         sPrevTickVb = vr_controller_buttons();
         return;
+    }
+    // While the port's ImGui menu is up the sticks belong to it; and while a ranged item is drawn
+    // and aiming (sAimActive, last tick's read), swapping the held item out from under the player
+    // mid-draw is asking for a stale-item state - the wheel waits.
+    {
+        auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();
+        if ((gui != nullptr && gui->GetMenuOrMenubarVisible()) || sAimActive) {
+            sWheelOpen = false;
+            sPrevTickVb = vr_controller_buttons();
+            return;
+        }
     }
     const unsigned vb = vr_controller_buttons();
     const unsigned edge = vb & ~sPrevTickVb;
@@ -163,11 +183,8 @@ void WheelTick() {
 // first-person aiming a projectile (func_800B7128: bow, hookshot, Zora boomerang, Deku bubble),
 // the right hand's angular velocity is synthesized into aim-stick input - rotate the hand and the
 // reticle tracks it 1:1 (gyro-style), through the game's own aim integration, clamps and camera
-// modes, for every aimable item uniformly.
-static int sSwingTicks = 0;    // press B while > 0
-static int sSwingCooldown = 0; // ticks until the next swipe may fire
-static bool sShieldHold = false;
-static bool sAimActive = false;
+// modes, for every aimable item uniformly. State lives with the wheel statics above so WheelTick
+// can read the aim flag.
 
 static void GesturesTick() {
     if (sSwingCooldown > 0) {
