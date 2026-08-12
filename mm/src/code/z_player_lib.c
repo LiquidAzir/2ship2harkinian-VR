@@ -2609,19 +2609,6 @@ s32 Player_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx**
                                            Actor* actor) {
     Player* player = (Player*)actor;
 
-#if defined(ENABLE_VR) && defined(_WIN32)
-    {
-        // VR First Person: the body would fill the view from inside the head, so everything except
-        // the hands and forearms is culled - held swords/shields/items ride the hand limbs and keep
-        // animating through the game's own swings. bodyPartsPos keeps updating via the post-limb
-        // pass, so the VR camera's head anchor stays live while hidden. (2s2h/vr/VrGame.cpp)
-        bool VrGame_SkipPlayerLimb(s32 limbIndex);
-        if (VrGame_SkipPlayerLimb(limbIndex)) {
-            return true;
-        }
-    }
-#endif
-
     if (!Player_OverrideLimbDrawGameplayCommon(play, limbIndex, dList, pos, rot, &player->actor)) {
         if (limbIndex == PLAYER_LIMB_LEFT_HAND) {
             Gfx** leftHandDLists = player->leftHandDLists;

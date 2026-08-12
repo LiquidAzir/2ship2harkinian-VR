@@ -13275,6 +13275,24 @@ Gfx* D_8085D574[] = {
 Color_RGB8 D_8085D580 = { 255, 255, 255 };
 Color_RGB8 D_8085D584 = { 80, 80, 200 };
 
+#if defined(ENABLE_VR) && defined(_WIN32)
+// VR First Person: run the real override first (held-item state, sword display lists and all its
+// bookkeeping still happen), then null out the display lists of everything but the arms. The limb
+// TRANSFORMS still run - returning true instead would skip the limb's matrix and collapse the whole
+// child chain, sending bodyPartsPos (the VR camera's head anchor) and the melee weapon quads to
+// garbage. (2s2h/vr/VrGame.cpp decides the mode.)
+static s32 VrPlayer_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos,
+                                                    Vec3s* rot, Actor* actor) {
+    bool VrGame_SkipPlayerLimb(s32 limbIndex);
+    s32 ret = Player_OverrideLimbDrawGameplayDefault(play, limbIndex, dList, pos, rot, actor);
+
+    if (!ret && VrGame_SkipPlayerLimb(limbIndex)) {
+        *dList = NULL;
+    }
+    return ret;
+}
+#endif
+
 void Player_Draw(Actor* thisx, PlayState* play) {
     Player* this = (Player*)thisx;
     f32 one = 1.0f;
@@ -13414,6 +13432,14 @@ void Player_Draw(Actor* thisx, PlayState* play) {
                                   NULL, NULL, NULL);
         } else {
             OverrideLimbDrawFlex sp84 = Player_OverrideLimbDrawGameplayDefault;
+#if defined(ENABLE_VR) && defined(_WIN32)
+            {
+                bool VrGame_FirstPersonHideBody(void);
+                if (VrGame_FirstPersonHideBody()) {
+                    sp84 = VrPlayer_OverrideLimbDrawGameplayDefault;
+                }
+            }
+#endif
             s32 lod = ((this->csAction != PLAYER_CSACTION_NONE) || (this->actor.projectedPos.z < 320.0f)) ? 0 : 1;
             Vec3f sp74;
 

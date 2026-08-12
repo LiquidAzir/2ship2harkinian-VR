@@ -43,6 +43,19 @@ void FB_CreateFramebuffers(void) {
 void FB_CopyToFramebuffer(Gfx** gfxp, s32 fb_src, s32 fb_dest, u8 oncePerFrame, u8* hasCopied) {
     Gfx* gfx = *gfxp;
 
+#if defined(ENABLE_VR) && defined(_WIN32)
+    {
+        // VR: "framebuffer 0" is the flat window, which the VR path never draws into - the live
+        // pixels sit in libultraship's managed VR framebuffer. Redirect the copy source there so
+        // VisMono, the shrink-window letterbox, the pause snapshot and the pictograph capture what
+        // was actually rendered. The copy opcode executes inside each eye's display-list pass, so
+        // each eye captures its own image. (Reading fb 0 here was the fullscreen black flicker:
+        // whole-screen redraws composited an undrawn/stale window buffer.)
+        s32 VrGame_RedirectCopySrcFb(s32 fbSrc);
+        fb_src = VrGame_RedirectCopySrcFb(fb_src);
+    }
+#endif
+
     gSPMatrix(gfx++, &gIdentityMtx, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
 
     gDPSetOtherMode(gfx++,

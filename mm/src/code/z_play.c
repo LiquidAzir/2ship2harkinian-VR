@@ -1588,6 +1588,16 @@ SkipPostWorldDraw:
 void Play_Draw(PlayState* this) {
     GraphicsContext* gfxCtx = this->state.gfxCtx;
 
+#if defined(ENABLE_VR) && defined(_WIN32)
+    {
+        // VR First Person: park the camera and this frame's view at Link's head HERE - after every
+        // game and camera update, before any view application below - so no later system can
+        // overwrite it. (2s2h/vr/VrGame.cpp)
+        void VrGame_FirstPersonPark(PlayState* play);
+        VrGame_FirstPersonPark(this);
+    }
+#endif
+
     {
         GraphicsContext* gfxCtx2 = this->state.gfxCtx;
 
