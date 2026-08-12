@@ -458,31 +458,31 @@ extern "C" void VrGame_MergePad(OSContPad* pad) {
         return;
     }
 
-    // Right stick feeds the pad's right-stick fields for the port's own camera consumers (parked
-    // while hand-aiming so the camera doesn't fight the aim).
-    if (!sAimActive && (fabsf(rs[0]) > dead || fabsf(rs[1]) > dead)) {
-        int rx = pad->right_stick_x + (int)lroundf(rs[0] * 85.0f);
-        int ry = pad->right_stick_y + (int)lroundf(rs[1] * 85.0f);
-        pad->right_stick_x = (int8_t)(rx < -128 ? -128 : (rx > 127 ? 127 : rx));
-        pad->right_stick_y = (int8_t)(ry < -128 ? -128 : (ry > 127 ? 127 : ry));
-    }
-
-    // MM mapping (SPEC.md §6.1 adapted to MM's B-is-sword layout):
-    //   right trigger -> B (sword)      A button      -> A (action/roll)
-    //   left trigger  -> C-Left item    B button      -> C-Up (look / Tatl)
-    //   X / Y         -> C-Down / C-Right items
-    //   left grip     -> Z (target)     right grip    -> R (shield)
-    //   menu          -> Start          R3            -> item wheel (handled above)
+    // MM mapping (user-tuned):
+    //   B button      -> B (sword)      A button   -> A (action/roll)
+    //   right stick   -> C buttons: left/down/right = items, up = C-Up (Tatl)
+    //   left grip     -> Z (target)     right grip -> R (shield)
+    //   menu          -> Start          L3 -> port menu   R3 -> item wheel (when enabled)
+    //   free (unbound): both triggers, X, Y
     u16 btn = 0;
-    if (vb & VR_BTN_RTRIGGER) { btn |= BTN_B; }
-    if (vb & VR_BTN_A)        { btn |= BTN_A; }
-    if (vb & VR_BTN_B)        { btn |= BTN_CUP; }
-    if (vb & VR_BTN_LTRIGGER) { btn |= BTN_CLEFT; }
-    if (vb & VR_BTN_X)        { btn |= BTN_CDOWN; }
-    if (vb & VR_BTN_Y)        { btn |= BTN_CRIGHT; }
-    if (vb & VR_BTN_LGRIP)    { btn |= BTN_Z; }
-    if (vb & VR_BTN_RGRIP)    { btn |= BTN_R; }
-    if (vb & VR_BTN_MENU)     { btn |= BTN_START; }
+    if (vb & VR_BTN_A)     { btn |= BTN_A; }
+    if (vb & VR_BTN_B)     { btn |= BTN_B; }
+    if (vb & VR_BTN_LGRIP) { btn |= BTN_Z; }
+    if (vb & VR_BTN_RGRIP) { btn |= BTN_R; }
+    if (vb & VR_BTN_MENU)  { btn |= BTN_START; }
+
+    // Right stick = C buttons. Dominant axis only, past a firm threshold, so a diagonal flick can
+    // never press an item and the look at once.
+    {
+        const float cThresh = 0.5f;
+        if (fabsf(rs[0]) > cThresh || fabsf(rs[1]) > cThresh) {
+            if (fabsf(rs[0]) >= fabsf(rs[1])) {
+                btn |= (rs[0] < 0.0f) ? BTN_CLEFT : BTN_CRIGHT;
+            } else {
+                btn |= (rs[1] > 0.0f) ? BTN_CUP : BTN_CDOWN;
+            }
+        }
+    }
     pad->button |= btn;
 }
 
