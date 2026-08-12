@@ -186,6 +186,52 @@ void WheelTick() {
 // modes, for every aimable item uniformly. State lives with the wheel statics above so WheelTick
 // can read the aim flag.
 
+// ---- first person -----------------------------------------------------------------------------
+//
+// The full VR treatment: each game tick the active camera (and the view the draw consumes) is
+// parked at Link's head - bodyPartsPos[PLAYER_BODYPART_HEAD] is animation-driven, so Deku, Goron
+// and Zora heights come for free - looking along the body's yaw; the headset supplies look
+// rotation on top through the eye matrices. The body is culled at the limb-draw override except
+// hands and forearms, so the sword swings visibly in your hand. Authored cutscene cameras play as
+// authored (the park stands down while a cutscene owns the camera).
+bool sFirstPersonNow = false;
+
+void FirstPersonTick() {
+    sFirstPersonNow = false;
+    if (!vr_is_active() || gPlayState == NULL || vr_get_view_mode() != VR_VIEW_FIRST_PERSON) {
+        return;
+    }
+    if (gPlayState->csCtx.state != CS_STATE_IDLE) {
+        return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (player == NULL) {
+        return;
+    }
+    Camera* cam = GET_ACTIVE_CAM(gPlayState);
+    if (cam == NULL) {
+        return;
+    }
+    sFirstPersonNow = true;
+
+    Vec3f head = player->bodyPartsPos[PLAYER_BODYPART_HEAD];
+    head.y += 5.0f; // the eyes sit a touch above the head joint (game units)
+    const f32 fwdX = Math_SinS(player->actor.shape.rot.y);
+    const f32 fwdZ = Math_CosS(player->actor.shape.rot.y);
+    Vec3f at = { head.x + fwdX * 100.0f, head.y, head.z + fwdZ * 100.0f };
+
+    // Both the camera (game logic: audio, culling, stick-relative movement) and the view the
+    // renderer consumes this frame, so the park lands regardless of update ordering.
+    cam->eye = head;
+    cam->eyeNext = head;
+    cam->at = at;
+    gPlayState->view.eye = head;
+    gPlayState->view.at = at;
+    gPlayState->view.up.x = 0.0f;
+    gPlayState->view.up.y = 1.0f;
+    gPlayState->view.up.z = 0.0f;
+}
+
 static void GesturesTick() {
     if (sSwingCooldown > 0) {
         sSwingCooldown--;
@@ -236,6 +282,24 @@ static void GesturesTick() {
 
 extern "C" bool VrGameWheel_Visible(void) {
     return sWheelOpen;
+}
+
+// Called per limb from Player_OverrideLimbDrawGameplayDefault (z_player_lib.c): true = cull. In
+// First Person only the arms survive - the held sword/shield/item display lists ride the hand
+// limbs, so combat stays visible in your hands.
+extern "C" bool VrGame_SkipPlayerLimb(s32 limbIndex) {
+    if (!sFirstPersonNow) {
+        return false;
+    }
+    switch (limbIndex) {
+        case PLAYER_LIMB_LEFT_FOREARM:
+        case PLAYER_LIMB_LEFT_HAND:
+        case PLAYER_LIMB_RIGHT_FOREARM:
+        case PLAYER_LIMB_RIGHT_HAND:
+            return false;
+        default:
+            return true;
+    }
 }
 
 extern "C" void VrGameWheel_DrawImGui(void) {
@@ -395,6 +459,7 @@ static void RegisterVrGame() {
     COND_HOOK(OnGameStateUpdate, true, []() {
         WheelTick();
         GesturesTick();
+        FirstPersonTick();
     });
 }
 

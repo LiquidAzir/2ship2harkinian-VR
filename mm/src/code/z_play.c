@@ -95,6 +95,20 @@ void Play_DrawMotionBlur(PlayState* this) {
 
     MotionBlur_Override(&sMotionBlurStatus, &alpha);
 
+#if defined(ENABLE_VR) && defined(_WIN32)
+    {
+        // VR: the blur history copies from framebuffer 0, but the stereo eyes render into
+        // libultraship's managed VR framebuffer - the capture holds desktop-mirror / stale frames,
+        // and compositing that back over each eye at ramping alpha is a hard black-to-color
+        // flicker in the headset. Off until the copy is wired to the per-eye VR framebuffer.
+        bool VrGame_StereoActive(void);
+        if (VrGame_StereoActive()) {
+            sMotionBlurStatus = MOTION_BLUR_OFF;
+            alpha = 0;
+        }
+    }
+#endif
+
     if (sMotionBlurStatus != MOTION_BLUR_OFF) {
         OPEN_DISPS(gfxCtx);
 

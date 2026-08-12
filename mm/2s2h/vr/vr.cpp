@@ -105,6 +105,7 @@ static bool sPassthroughOn = false; // MR toggled on this frame (gVRPassthrough 
 static bool sBootTried  = false;
 static bool sBootOk     = false; // set only when vr_boot reaches "OpenXR ready"
 static bool sRunning    = false;
+static volatile long sFrameHeartbeat = 0; // advanced per begun frame; the zombie watchdog reads it
 static bool sFrameBegun = false;
 static bool sViewsValid = false;
 static bool sPoseTracked = false;
@@ -156,9 +157,10 @@ static float sMenuSize    = 3.6f; // menu/title panel width (m)
 // head), 2=unused here (Cockpit in the flying ports), 3=Diorama (world shrunk to a tabletop),
 // 4=Theater (flat frame on a head-locked screen). The eye-matrix builder branches on this; Engine.cpp
 // routes Theater to the flat panel path. Tunables below are read from CVars each frame so they apply live.
-static int   sViewMode           = 0;       // VrViewMode - MM ships Third Person as the default: First
-                                            // Person needs the Phase 5-6 player-camera override that
-                                            // does not exist yet (donor shipped FP with that glue in).
+static int   sViewMode           = 1;       // VrViewMode - First Person ships as the default: VrGame
+                                            // parks the game camera at Link's head each tick and hides
+                                            // the body (hands/held items stay), the full VR treatment.
+                                            // gVRViewMode=0 falls back to Third Person chase cam.
 static float sFirstPersonForward = 0.00f;   // meters of extra forward push in First Person. The game
                                             // camera itself is parked at Banjo's eyes in VR FP
                                             // (port_vrFirstPerson_override), so this is a fine-tune
@@ -500,7 +502,7 @@ static void vr_build_eye_matrix(int eye) {
     // never more separation than a real IPD. This is why the depth stays balanced without the
     // player having to re-tune Stereo every time they change scale.
     {
-        const float kLifeSizeScale = 100.0f;
+        const float kLifeSizeScale = 40.0f; // MM: ≈40 units/m is life size (donor's Banjo was 100)
         float modeScale = (sViewMode == 3) ? sDioramaWorldScale
                         : (sViewMode == 1) ? sFirstPersonScale
                         : sWorldScale;
@@ -1683,6 +1685,49 @@ static void vr_boot(void) {
     // (VR keeps rendering, the gamepad keeps working).
     vr_input_create();
 
+    // Zombie watchdog. When the wireless runtime dies mid-session (Virtual Desktop streaming
+    // stopped), xrWaitFrame can block FOREVER in the loader: the game thread wedges in a kernel
+    // wait, the window close is never processed, and the process survives taskkill as an
+    // unkillable zombie holding the exe locked (observed live with VDXR). No in-thread fix exists
+    // for a blocked loader call, so a side thread watches the frame heartbeat: a RUNNING session
+    // whose frames freeze for ~16 s means the runtime is gone - log it and terminate hard so a
+    // zombie can never survive. A dozing headset stays safe: runtimes throttle xrWaitFrame while
+    // idle but still return frames, so the heartbeat keeps advancing.
+    {
+        static bool sWatchdogStarted = false;
+        if (!sWatchdogStarted) {
+            sWatchdogStarted = true;
+            HANDLE t = CreateThread(
+                NULL, 0,
+                [](LPVOID) -> DWORD {
+                    long last = 0;
+                    int stale = 0;
+                    for (;;) {
+                        Sleep(2000);
+                        if (!sRunning) {
+                            stale = 0;
+                            continue;
+                        }
+                        long now = sFrameHeartbeat;
+                        if (now == last) {
+                            if (++stale >= 8) {
+                                vrlog("[VR] watchdog: session frozen ~16 s (runtime dead / streaming "
+                                      "stopped) - terminating so no zombie process survives.\n");
+                                TerminateProcess(GetCurrentProcess(), 0);
+                            }
+                        } else {
+                            stale = 0;
+                            last = now;
+                        }
+                    }
+                },
+                NULL, 0, NULL);
+            if (t != NULL) {
+                CloseHandle(t);
+            }
+        }
+    }
+
     sBootOk = true;
     vrlog("[VR] OpenXR ready; waiting for session to start.\n");
 }
@@ -1785,7 +1830,7 @@ extern "C" int vr_fog_mode(void) {
 // bakes 1/scale into clip space, so a world point d life-size meters out lands at
 // clip_w = d * kLifeSizeScale / effScale - the near/far sliders convert through the active mode's scale.
 extern "C" void vr_fog_linear_coeffs(float* mul, float* off) {
-    const float kLifeSizeScale = 100.0f; // the default units-per-meter mapping the sliders assume
+    const float kLifeSizeScale = 40.0f; // MM: the life-size units-per-meter the sliders assume (Banjo was 100)
     // Same scale the eye matrix uses per mode (Third Person uses the global World Scale).
     float effScale = (sViewMode == VR_VIEW_FIRST_PERSON) ? sFirstPersonScale : sWorldScale;
     if (effScale < 1.0f) effScale = 1.0f;
@@ -2083,6 +2128,7 @@ extern "C" void vr_begin_frame(void) {
     sFrameState.type = XR_TYPE_FRAME_STATE;
     sFrameState.next = NULL;
     if (!xrok(xrWaitFrame(sSession, &fwi, &sFrameState), "xrWaitFrame")) return;
+    sFrameHeartbeat++; // the zombie watchdog watches this advance; a wait that never returns trips it
 
     // Say the headset's rate out loud once (and again if the runtime changes it mid-session, which
     // Quest does when you switch refresh in its settings): this is the number the whole frame pace
