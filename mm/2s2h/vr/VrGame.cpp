@@ -114,7 +114,7 @@ void WheelTick() {
         gPlayState->pauseCtx.state != PAUSE_STATE_OFF ||
         gPlayState->msgCtx.msgMode != MSGMODE_NONE || // textboxes and shops own the buttons; a live
                                                       // equip mid-dialog can desync shop button state
-        CVarGetInteger("gVRMotionControls", 1) == 0) {
+        CVarGetInteger("gVRMotionControls", 0) == 0) {
         sWheelOpen = false;
         sPrevTickVb = vr_controller_buttons();
         return;
@@ -207,7 +207,7 @@ static void GesturesTick() {
         sSwingTicks--;
     }
     if (!vr_is_active() || !vr_controllers_active() || gPlayState == NULL ||
-        gPlayState->pauseCtx.state != PAUSE_STATE_OFF || CVarGetInteger("gVRMotionControls", 1) == 0) {
+        gPlayState->pauseCtx.state != PAUSE_STATE_OFF || CVarGetInteger("gVRMotionControls", 0) == 0) {
         sSwingTicks = 0;
         sShieldHold = false;
         sAimActive = false;
@@ -269,8 +269,13 @@ extern "C" void VrGame_FirstPersonPark(PlayState* play) {
     }
     sFirstPersonNow = true;
 
-    Vec3f eye = player->bodyPartsPos[PLAYER_BODYPART_HEAD];
-    eye.y += 5.0f; // the eyes sit a touch above the head joint (game units)
+    // STABLE anchor: the actor's position plus a fixed per-form eye height. Anchoring on the
+    // animated head joint made the camera ride every walk-cycle bob - Deku's waddle especially
+    // read as constant swaying in the headset. Player_GetHeight is form-aware (Deku short, Goron
+    // curled even shorter, Fierce Deity tall), so each form still gets the right eye level while
+    // the animation no longer moves the view at all.
+    Vec3f eye = player->actor.world.pos;
+    eye.y += Player_GetHeight(player) * 0.90f;
     Vec3f at = { eye.x + Math_SinS(player->actor.shape.rot.y) * 100.0f, eye.y,
                  eye.z + Math_CosS(player->actor.shape.rot.y) * 100.0f };
     Vec3f up = { 0.0f, 1.0f, 0.0f };
@@ -384,7 +389,7 @@ extern "C" void VrGameWheel_DrawImGui(void) {
 // ---- pad merge --------------------------------------------------------------------------------
 
 extern "C" void VrGame_MergePad(OSContPad* pad) {
-    if (pad == NULL || !vr_controllers_active() || CVarGetInteger("gVRMotionControls", 1) == 0) {
+    if (pad == NULL || !vr_controllers_active() || CVarGetInteger("gVRMotionControls", 0) == 0) {
         return;
     }
     auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();

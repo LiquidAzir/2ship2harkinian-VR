@@ -13432,14 +13432,6 @@ void Player_Draw(Actor* thisx, PlayState* play) {
                                   NULL, NULL, NULL);
         } else {
             OverrideLimbDrawFlex sp84 = Player_OverrideLimbDrawGameplayDefault;
-#if defined(ENABLE_VR) && defined(_WIN32)
-            {
-                bool VrGame_FirstPersonHideBody(void);
-                if (VrGame_FirstPersonHideBody()) {
-                    sp84 = VrPlayer_OverrideLimbDrawGameplayDefault;
-                }
-            }
-#endif
             s32 lod = ((this->csAction != PLAYER_CSACTION_NONE) || (this->actor.projectedPos.z < 320.0f)) ? 0 : 1;
             Vec3f sp74;
 
@@ -13452,6 +13444,17 @@ void Player_Draw(Actor* thisx, PlayState* play) {
                     sp84 = Player_OverrideLimbDrawGameplayFirstPerson;
                 }
             }
+#if defined(ENABLE_VR) && defined(_WIN32)
+            {
+                // VR First Person wins LAST: placed after the game's own first-person selector,
+                // because that override (chosen during aim/look moments) draws head geometry the
+                // VR eye sits inside - "I can see Link's head" - while ours keeps only the arms.
+                bool VrGame_FirstPersonHideBody(void);
+                if (VrGame_FirstPersonHideBody()) {
+                    sp84 = VrPlayer_OverrideLimbDrawGameplayDefault;
+                }
+            }
+#endif
 
             if (this->stateFlags2 & PLAYER_STATE2_4000000) {
                 s16 temp_s0_2 = play->gameplayFrames * 600;
