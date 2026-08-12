@@ -114,7 +114,7 @@ void WheelTick() {
         gPlayState->pauseCtx.state != PAUSE_STATE_OFF ||
         gPlayState->msgCtx.msgMode != MSGMODE_NONE || // textboxes and shops own the buttons; a live
                                                       // equip mid-dialog can desync shop button state
-        CVarGetInteger("gVRMotionControls", 0) == 0) {
+        CVarGetInteger("gVRMotionControls", 1) == 0) {
         sWheelOpen = false;
         sPrevTickVb = vr_controller_buttons();
         return;
@@ -134,6 +134,12 @@ void WheelTick() {
     const unsigned edge = vb & ~sPrevTickVb;
     sPrevTickVb = vb;
 
+    // The wheel ships OFF while the game is button-only (gVRItemWheel=1 re-enables): the pause
+    // menu handles item assignment the vanilla way.
+    if (CVarGetInteger("gVRItemWheel", 0) == 0) {
+        sWheelOpen = false;
+        return;
+    }
     if (edge & VR_BTN_RSTICK) {
         if (!sWheelOpen) {
             sWheelOpen = true;
@@ -207,7 +213,7 @@ static void GesturesTick() {
         sSwingTicks--;
     }
     if (!vr_is_active() || !vr_controllers_active() || gPlayState == NULL ||
-        gPlayState->pauseCtx.state != PAUSE_STATE_OFF || CVarGetInteger("gVRMotionControls", 0) == 0) {
+        gPlayState->pauseCtx.state != PAUSE_STATE_OFF || CVarGetInteger("gVRMotionControls", 1) == 0) {
         sSwingTicks = 0;
         sShieldHold = false;
         sAimActive = false;
@@ -217,12 +223,12 @@ static void GesturesTick() {
 
     // Aimed items: state read here on the game thread; the stick synth itself runs in the pad
     // merge so it uses the freshest hand sample each input read.
-    sAimActive = (player != NULL) && CVarGetInteger("gVRAimedItems", 1) != 0 && func_800B7128(player);
+    sAimActive = (player != NULL) && CVarGetInteger("gVRAimedItems", 0) != 0 && func_800B7128(player);
 
     float pos[3], lin[3];
     // Sword swipe, right hand: linear speed spike -> one B press. The cooldown keeps one physical
     // swipe from machine-gunning B across ticks; 1.7 m/s is brisk-but-not-violent (live-tunable).
-    if (CVarGetInteger("gVRSwordSwing", 1) != 0 && !sWheelOpen && !sAimActive &&
+    if (CVarGetInteger("gVRSwordSwing", 0) != 0 && !sWheelOpen && !sAimActive &&
         vr_hand_state(1, NULL, NULL, lin, NULL)) {
         const float speed = sqrtf(lin[0] * lin[0] + lin[1] * lin[1] + lin[2] * lin[2]);
         if (speed > CVarGetFloat("gVRSwingSpeed", 1.7f) && sSwingCooldown == 0) {
@@ -233,7 +239,7 @@ static void GesturesTick() {
     }
     // Shield, left hand: raised toward head height holds R. Hysteresis band: raise above 30 cm
     // below the head, release only once clearly dropped past 42 cm - no flicker at the boundary.
-    if (CVarGetInteger("gVRShieldRaise", 1) != 0 && vr_hand_state(0, pos, NULL, NULL, NULL)) {
+    if (CVarGetInteger("gVRShieldRaise", 0) != 0 && vr_hand_state(0, pos, NULL, NULL, NULL)) {
         if (!sShieldHold && pos[1] > -0.30f) {
             sShieldHold = true;
             vr_controller_rumble(0.25f, 0.03f);
@@ -389,7 +395,7 @@ extern "C" void VrGameWheel_DrawImGui(void) {
 // ---- pad merge --------------------------------------------------------------------------------
 
 extern "C" void VrGame_MergePad(OSContPad* pad) {
-    if (pad == NULL || !vr_controllers_active() || CVarGetInteger("gVRMotionControls", 0) == 0) {
+    if (pad == NULL || !vr_controllers_active() || CVarGetInteger("gVRMotionControls", 1) == 0) {
         return;
     }
     auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();
